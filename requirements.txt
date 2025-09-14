@@ -3,3 +3,4 @@ python-telegram-bot
 requests
 Flask
 google-genai
+google-generativeai
