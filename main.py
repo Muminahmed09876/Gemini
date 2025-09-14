@@ -5,8 +5,6 @@
 
 # কোডটি চালানোর আগে, নিচের লাইব্রেরিগুলো অবশ্যই ইনস্টল করতে হবে:
 # pip install -r requirements.txt
-# অথবা,
-# pip install python-dotenv python-telegram-bot requests Flask google-genai
 
 import os
 import threading
@@ -17,7 +15,8 @@ import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from google import genai
+# সঠিক জেমিনি লাইব্রেরিটি স্পষ্টভাবে ইম্পোর্ট করা হয়েছে
+import google.generativeai as genai
 
 # .env ফাইল থেকে পরিবেশ ভেরিয়েবল লোড করা হয়
 load_dotenv()
