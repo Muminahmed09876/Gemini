@@ -1,3 +1,4 @@
-pip install python-telegram-bot
-pip install google-generativeai
-pip install python-dotenv
+requestshon-telegram-bot
+google-generativeai
+flask
+requests
