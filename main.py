@@ -1,35 +1,23 @@
+import logging
 import os
 import threading
-from flask import Flask, render_template_string
-import requests
 import time
-import logging
-from dotenv import load_dotenv
+import requests
+import google.generativeai as genai
+from flask import Flask, render_template_string
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import google.generativeai as genai
-
-# .env ফাইল থেকে ভেরিয়েবল লোড করুন
-load_dotenv()
 
 # Set up logging for clarity
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# --- Configuration from .env ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
-
-# Gemini API কনফিগারেশন
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
-
 # --- Flask Web Server and Ping Service ---
-# The Flask app is created.
 flask_app = Flask(__name__)
 
-# env variables
+# Environment variables
 PORT = int(os.getenv("PORT", "5000"))
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
@@ -39,7 +27,7 @@ def home():
     Renders a simple HTML page to confirm the bot's web server is running.
     """
     html_content = """
-    <!DOCTYPE html>
+    <!DOCTYPE-html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
@@ -67,7 +55,7 @@ def home():
     </head>
     <body>
         <div class="container">
-            <h1>TA File Share Bot is running! ✅</h1>
+            <h1>Gemini Bot is running! ✅</h1>
             <p>This page confirms that the bot's web server is active.</p>
         </div>
     </body>
@@ -78,7 +66,6 @@ def home():
 def ping_service():
     """
     Periodically pings the bot's external hostname to keep the web service awake.
-    This is often used on platforms like Render that spin down inactive services.
     """
     if not RENDER_EXTERNAL_HOSTNAME:
         logger.info("Render URL is not set. Ping service is disabled.")
@@ -104,64 +91,64 @@ def run_flask_and_ping():
     ping_thread.start()
     logger.info("Flask and Ping services started.")
 
-# --- Telegram Bot Functionality ---
+# --- Telegram Bot Handlers and Logic ---
 
-# ইউজার অ্যাডমিন কিনা তা চেক করার জন্য একটি ডেকোরেটর
+# এপিআই কী এবং অ্যাডমিন আইডি সেট করুন
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
+ADMIN_TELEGRAM_ID = YOUR_ADMIN_TELEGRAM_ID # আপনার আইডি এখানে সংখ্যা হিসেবে দিন, স্ট্রিং নয়
+
+# জেমিনি মডেল কনফিগার করুন
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-pro')
+
+# অ্যাডমিন-অনলি ফাংশন ডেকোরেটর
 def admin_only(func):
-    """শুধুমাত্র অ্যাডমিন ইউজারদের জন্য একটি ডেকোরেটর"""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        if user_id != ADMIN_USER_ID:
-            logger.info(f"Unauthorized access attempt by user ID: {user_id}")
-            await update.message.reply_text("দুঃখিত, আপনি এই বটটি ব্যবহার করতে পারবেন না।")
-            return
-        return await func(update, context)
+        if user_id == ADMIN_TELEGRAM_ID:
+            await func(update, context)
+        else:
+            await update.message.reply_text("দুঃখিত, এই কমান্ডটি শুধুমাত্র অ্যাডমিনের জন্য।")
     return wrapper
 
-# /start কমান্ডের জন্য হ্যান্ডলার
+# /start কমান্ড হ্যান্ডলার
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """বট শুরু হলে এটি ব্যবহার হয়"""
-    await update.message.reply_text(
-        f"নমস্কার! আমি জেমিনি, আপনার ব্যক্তিগত সহকারী। আপনি আমাকে যেকোনো প্রশ্ন করতে পারেন।"
-    )
+    await update.message.reply_text("হ্যালো! আমি একটি জেমিনি-পাওয়ার্ড বট। আপনি আমাকে প্রশ্ন করতে পারেন।")
 
-# মেসেজ হ্যান্ডলার
+# মেসেজ হ্যান্ডলার (প্রশ্ন উত্তর দেওয়ার জন্য)
 @admin_only
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ব্যবহারকারীর মেসেজ জেমিনি এপিআইতে পাঠায় এবং উত্তর দেয়"""
-    user_message = update.message.text
-    
+    user_query = update.message.text
     try:
-        # জেমিনি মডেল থেকে উত্তর আনা
-        response = model.generate_content(user_message)
-        bot_reply = response.text
-        
-        # জেমিনির উত্তর ব্যবহারকারীকে পাঠানো
-        await update.message.reply_text(bot_reply)
+        response = model.generate_content(user_query)
+        await update.message.reply_text(response.text)
     except Exception as e:
-        logger.error(f"Error while communicating with Gemini API: {e}")
-        await update.message.reply_text("কিছু একটা ভুল হয়েছে, আবার চেষ্টা করুন।")
+        await update.message.reply_text(f"একটি ত্রুটি ঘটেছে: {e}")
 
-# মেইন ফাংশন
-def main() -> None:
-    """বটটি রান করে"""
+# প্রধান ফাংশন
+def main_bot() -> None:
+    """Starts the Telegram bot's polling."""
+    # অ্যাপ্লিকেশন তৈরি করুন
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # কমান্ড হ্যান্ডলার যোগ করুন
+    application.add_handler(CommandHandler("start", start))
+
+    # মেসেজ হ্যান্ডলার যোগ করুন
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # পোলিং শুরু করুন
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+def start_all_services():
+    """Starts both the Flask server and the Telegram bot in separate threads."""
+    bot_thread = threading.Thread(target=main_bot)
+    bot_thread.start()
     
-    # Run Flask and Ping services in the background
+    # Start the Flask web server and ping service
     run_flask_and_ping()
 
-    # Build the Telegram bot application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Command handlers
-    application.add_handler(CommandHandler("start", start))
-    
-    # Message handlers (for text messages only, excluding commands)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Start the bot in polling mode
-    logger.info("Telegram Bot is running...")
-    application.run_polling()
-
 if __name__ == "__main__":
-    main()
+    start_all_services()
