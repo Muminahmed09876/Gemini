@@ -1,4 +1,5 @@
-requestshon-telegram-bot
-google-generativeai
-flask
+pyrogram
+tgcrypto
+moviepy
+Flask
 requests
