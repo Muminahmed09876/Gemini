@@ -3,3 +3,8 @@ tgcrypto
 moviepy
 Flask
 requests
+ffmpeg-python
+python-dotenv
+ffmpeg
+gunicorn==20.1.0
+python-telegram-bot==20.7
