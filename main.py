@@ -1,60 +1,55 @@
-# -*- coding: utf-8 -*-
-
-import logging
 import os
-import asyncio
+import logging
 import threading
+import subprocess
 import requests
 import time
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message
-from moviepy.editor import VideoFileClip
-from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 from flask import Flask, render_template_string
+from telegram import Update
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    filters,
+    ContextTypes,
+)
 
-# Logging সেট আপ করুন
+# --- Configuration and Environment Variables ---
+# Set up logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Load environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+ADMIN_ID = os.getenv("ADMIN_ID") # Admin's Telegram User ID (as a string)
+
+# Check for required environment variables
+if not all([BOT_TOKEN, API_ID, API_HASH, ADMIN_ID]):
+    logger.error("Missing required environment variables. Please set BOT_TOKEN, API_ID, API_HASH, and ADMIN_ID.")
+    exit()
+
 # --- Flask Web Server and Ping Service ---
 flask_app = Flask(__name__)
-
-# এনভায়রনমেন্ট ভেরিয়েবল থেকে তথ্য লোড করুন
 PORT = int(os.getenv("PORT", "5000"))
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
 @flask_app.route('/')
 def home():
-    """
-    একটি সাধারণ HTML পৃষ্ঠা রেন্ডার করে যা বটের ওয়েব সার্ভার চালু আছে কিনা তা নিশ্চিত করে।
-    """
     html_content = """
-    <!DOCTYPE html>
+    <!DOCTYPE-html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Bot Status</title>
         <style>
-            body {
-                font-family: Arial, sans-serif;
-                background-color: #f0f2f5;
-                color: #333;
-                text-align: center;
-                padding-top: 50px;
-            }
-            .container {
-                background-color: #fff;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-                display: inline-block;
-            }
-            h1 {
-                color: #28a745;
-            }
+            body { font-family: Arial, sans-serif; background-color: #f0f2f5; color: #333; text-align: center; padding-top: 50px; }
+            .container { background-color: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); display: inline-block; }
+            h1 { color: #28a745; }
         </style>
     </head>
     <body>
@@ -68,167 +63,163 @@ def home():
     return render_template_string(html_content)
 
 def ping_service():
-    """
-    পর্যায়ক্রমে বটের এক্সটার্নাল হোস্টনেম-এ পিং করে ওয়েব সার্ভিসকে সচল রাখে।
-    """
     if not RENDER_EXTERNAL_HOSTNAME:
-        logger.info("Render URL সেট করা নেই। পিং সার্ভিস নিষ্ক্রিয় করা হলো।")
+        logger.info("Render URL is not set. Ping service is disabled.")
         return
 
     url = f"http://{RENDER_EXTERNAL_HOSTNAME}"
     while True:
         try:
             response = requests.get(url, timeout=10)
-            logger.info(f"Pinged {url} | স্ট্যাটাস কোড: {response.status_code}")
+            logger.info(f"Pinged {url} | Status Code: {response.status_code}")
         except requests.exceptions.RequestException as e:
-            logger.error(f"পিং করার সময় ত্রুটি: {url}: {e}")
-        time.sleep(600)  # প্রতি ১০ মিনিটে পিং করুন (৬০০ সেকেন্ড)
+            logger.error(f"Error pinging {url}: {e}")
+        time.sleep(600)  # Ping every 10 minutes
 
 def run_flask_and_ping():
-    """
-    ফ্ল্যাঙ্ক ওয়েব সার্ভার এবং পিং সার্ভিস আলাদা থ্রেডে চালু করে।
-    """
     flask_thread = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False))
     flask_thread.start()
     
     ping_thread = threading.Thread(target=ping_service)
     ping_thread.start()
-    logger.info("ফ্ল্যাঙ্ক এবং পিং সার্ভিস শুরু হয়েছে।")
+    logger.info("Flask and Ping services started.")
 
-# --- বট অ্যাপ্লিকেশন ---
-# এনভায়রনমেন্ট ভেরিয়েবল থেকে বট, API, এবং অ্যাডমিন তথ্য লোড করুন।
-try:
-    API_ID = int(os.getenv("API_ID"))
-    API_HASH = os.getenv("API_HASH")
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    ADMIN_ID = int(os.getenv("ADMIN_ID"))
-except (ValueError, TypeError) as e:
-    logger.error(f"এনভায়রনমেন্ট ভেরিয়েবল লোড করতে ত্রুটি: {e}")
-    logger.error("নিশ্চিত করুন যে API_ID এবং ADMIN_ID সংখ্যা এবং বাকিগুলো স্ট্রিং হিসেবে সেট করা আছে।")
-    exit()
+# --- Telegram Bot Logic ---
+# State for video conversions
+user_states = {}
 
-# ভিডিও ফাইলগুলো অস্থায়ীভাবে সংরক্ষণ করার জন্য একটি ডিরেক্টরি তৈরি করুন
-TEMP_DIR = "temp_videos"
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
+def is_admin(update: Update):
+    """Checks if the user is the admin."""
+    return str(update.effective_user.id) == ADMIN_ID
 
-# Initialize the Pyrogram client
-app = Client(
-    "video_converter_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Hello! I am a video conversion bot. I only work for admins.")
 
-async def progress_callback(current, total):
-    """Callback function for showing download progress."""
-    logger.info(f"Downloaded {current * 100 / total:.1f}%")
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        await update.message.reply_text("This command is for admins only.")
+        return
 
-async def convert_video(input_path: str, output_path: str, message: Message):
-    """
-    Converts and compresses a video file with advanced settings.
-    This function is run in a separate thread to avoid blocking the bot.
-    """
-    try:
-        await message.reply_text("ভিডিওটি প্রসেস করা হচ্ছে। অনুগ্রহ করে অপেক্ষা করুন... ⏳")
-        clip = VideoFileClip(input_path)
-        
-        # Determine new resolution (e.g., scale to 720p if original is larger)
-        target_height = 720
-        if clip.h > target_height:
-            resized_clip = clip.resize(height=target_height)
-        else:
-            resized_clip = clip
-            
-        resized_clip.write_videofile(
-            output_path, 
-            codec="libx264",
-            audio_codec="aac",
-            bitrate="1000k", # Adjust bitrate to control file size and quality
-            preset="medium"  # 'ultrafast', 'fast', 'medium', 'slow' for trade-off between speed and size
-        )
-        
-        clip.close()
-        resized_clip.close()
-        return True
-    except Exception as e:
-        logger.error(f"Error during video conversion: {e}")
-        return False
-
-@app.on_message(filters.command("start") & filters.private)
-async def start_command(client: Client, message: Message):
-    """Handles the /start command."""
-    await message.reply_text(
-        "স্বাগতম! আমাকে একটি ভিডিও পাঠান এবং আমি এর আকার ছোট করে দেব। "
-        "আপনি যদি ভিডিওর কিছু অংশ কাটতে চান, তাহলে ভিডিওর সাথে `/cut <start> <end>` লিখে পাঠান।"
+    await update.message.reply_text(
+        "Available Commands:\n"
+        "/video_convert [width]x[height] - Reduce video size (e.g., /video_convert 640x480)\n"
+        "/format_change [format] - Change video format (e.g., /format_change gif)"
     )
 
-@app.on_message(filters.command("cut") & filters.private)
-async def cut_command(client: Client, message: Message):
-    """Handles the /cut command to trim videos."""
-    if not message.reply_to_message or not message.reply_to_message.video:
-        await message.reply_text("অনুগ্রহ করে একটি ভিডিওর উত্তরে `/cut <শুরু> <শেষ>` লিখে পাঠান।")
+async def video_convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        await update.message.reply_text("This command is for admins only.")
         return
-    
-    try:
-        _, start_time, end_time = message.text.split()
-        start_time, end_time = int(start_time), int(end_time)
-        if start_time < 0 or end_time < 0 or start_time >= end_time:
-            await message.reply_text("সময়সীমাটি সঠিক নয়। শুরু সময় অবশ্যই শেষ সময়ের থেকে কম হতে হবে।")
-            return
-    except (ValueError, IndexError):
-        await message.reply_text("ব্যবহার: `/cut <শুরু_সময়> <শেষ_সময়>` (সেকেন্ডে)")
-        return
-        
-    await message.reply_text("ভিডিওটি কাটা হচ্ছে... ✂️")
-    
-    input_video = await message.reply_to_message.download(file_name=os.path.join(TEMP_DIR, f"{message.reply_to_message.video.file_id}_original.mp4"), progress=progress_callback)
-    output_video = os.path.join(TEMP_DIR, f"{message.reply_to_message.video.file_id}_cut.mp4")
-    
-    try:
-        await asyncio.to_thread(
-            ffmpeg_extract_subclip, input_video, start_time, end_time, targetname=output_video
-        )
-        await message.reply_video(output_video, caption="আপনার কাটা ভিডিওটি এখানে।")
-    except Exception as e:
-        logger.error(f"Error while cutting video: {e}")
-        await message.reply_text("ভিডিও কাটতে সমস্যা হয়েছে।")
-    finally:
-        os.remove(input_video)
-        if os.path.exists(output_video):
-            os.remove(output_video)
 
-@app.on_message(filters.video & filters.private)
-async def video_handler(client: Client, message: Message):
-    """Handles video messages to compress them."""
-    await message.reply_text("ভিডিও পেয়েছি! এটি কম্প্রেস করা হচ্ছে... 🎬")
+    if not context.args:
+        await update.message.reply_text("Please provide the new resolution (e.g., /video_convert 640x480).")
+        return
+
+    resolution = context.args[0]
+    user_id = str(update.effective_user.id)
+    user_states[user_id] = {"action": "video_convert", "value": resolution}
+
+    await update.message.reply_text(
+        f"Send me the video you want to convert to {resolution}. I will process it."
+    )
+
+async def format_change_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        await update.message.reply_text("This command is for admins only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Please provide the new format (e.g., /format_change gif).")
+        return
+
+    new_format = context.args[0]
+    user_id = str(update.effective_user.id)
+    user_states[user_id] = {"action": "format_change", "value": new_format}
     
-    input_video = await message.download(file_name=os.path.join(TEMP_DIR, f"{message.video.file_id}_original.mp4"), progress=progress_callback)
-    output_video = os.path.join(TEMP_DIR, f"{message.video.file_id}_compressed.mp4")
+    await update.message.reply_text(
+        f"Send me the video you want to change to .{new_format}. I will process it."
+    )
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        await update.message.reply_text("This bot only works for admins.")
+        return
+
+    user_id = str(update.effective_user.id)
+    if user_id not in user_states:
+        await update.message.reply_text("Please select a command first, like /video_convert or /format_change.")
+        return
+
+    action = user_states[user_id]["action"]
+    value = user_states[user_id]["value"]
+
+    await update.message.reply_text("Video received! Please wait, converting...")
+
+    file_id = update.message.video.file_id
+    new_file = await context.bot.get_file(file_id)
     
-    success = await convert_video(input_video, output_video, message)
+    input_path = f"input_{file_id}.mp4"
     
-    if success and os.path.exists(output_video):
-        await message.reply_video(output_video, caption="আপনার কম্প্রেস করা ভিডিওটি এখানে। ✨")
-    else:
-        await message.reply_text("ভিডিও কম্প্রেস করতে সমস্যা হয়েছে।")
-    
-    # Cleanup
-    if os.path.exists(input_video):
-        os.remove(input_video)
-    if os.path.exists(output_video):
-        os.remove(output_video)
+    try:
+        await new_file.download_to_drive(input_path)
+        logger.info(f"Video downloaded to {input_path}")
+
+        ffmpeg_command = ["ffmpeg", "-i", input_path]
+        output_path = f"output_{file_id}"
+        output_format = "mp4" # default output format
+
+        if action == "video_convert":
+            ffmpeg_command.extend(["-vf", f"scale={value}"])
+            output_path += ".mp4"
+            
+        elif action == "format_change":
+            output_path += f".{value}"
+            output_format = value
+        
+        ffmpeg_command.append(output_path)
+        
+        subprocess.run(ffmpeg_command, check=True)
+        logger.info(f"Video converted to {output_path}")
+
+        if output_format == "gif":
+             await context.bot.send_animation(
+                chat_id=update.effective_chat.id,
+                animation=open(output_path, "rb"),
+                caption="Here is your converted file!"
+            )
+        else:
+            await context.bot.send_video(
+                chat_id=update.effective_chat.id,
+                video=open(output_path, "rb"),
+                caption="Here is your converted video!"
+            )
+        logger.info("Converted video sent to user.")
+        
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        await update.message.reply_text("Sorry, an error occurred during conversion.")
+    finally:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        user_states.pop(user_id, None)
+        logger.info("Temporary files and user state cleaned up.")
 
 def main() -> None:
-    """বট এবং ওয়েব সার্ভিস শুরু করুন।"""
+    """Start the bot."""
     run_flask_and_ping()
-    try:
-        app.run()
-    except (BotMethodInvalid, AuthKeyUnregistered) as e:
-        logger.error(f"অপ্রমাণিত টোকেন বা API হ্যাশ: {e}")
-        logger.error("আপনার বট টোকেন বা API তথ্য সঠিক আছে কিনা তা নিশ্চিত করুন।")
-    except Exception as e:
-        logger.error(f"একটি অপ্রত্যাশিত ত্রুটি ঘটেছে: {e}")
+
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("video_convert", video_convert_command))
+    application.add_handler(CommandHandler("format_change", format_change_command))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_video))
+
+    application.run_polling()
+    logger.info("Bot started and is listening for messages...")
 
 if __name__ == "__main__":
     main()
