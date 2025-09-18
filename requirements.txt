@@ -1,4 +1,5 @@
-python-dotenvhachoir
+aiohttp
+hachoir
 numpy
 Pillow
 requests
@@ -22,7 +23,7 @@ yt-dlp
 lk21
 pytube
 flask
-hachoir
+pyrogram
 gunicorn==20.1.0
 python-telegram-bot==20.7
 python-dotenv
