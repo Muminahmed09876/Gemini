@@ -258,16 +258,6 @@ class SendNowAPI:
             else:
                 raise Exception(f"Failed to rename file: {data.get('msg')}")
 
-    async def get_direct_link(self, session: aiohttp.ClientSession, file_code: str):
-        url = f"{self.base_url}/file/direct_link?key={self.api_key}&file_code={file_code}"
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            if data["status"] == 200:
-                return data["result"]["url"]
-            else:
-                raise Exception(f"Failed to get direct link: {data.get('msg')}")
-
     async def delete_file(self, session: aiohttp.ClientSession, file_code: str):
         url = f"{self.base_url}/file/delete?key={self.api_key}&file_code={file_code}"
         async with session.get(url) as resp:
@@ -316,16 +306,19 @@ async def upload_to_cloud_process(client: Client, message: Message, file_path: P
             await api.rename_file(session, file_code, new_name)
             
             # Get the direct link
-            direct_link = await api.get_direct_link(session, file_code)
+            # direct_link = await api.get_direct_link(session, file_code)
             
             # Schedule the deletion task
             delete_task = asyncio.create_task(scheduled_delete_task(file_code, message.chat.id))
             SENDNOW_DELETE_TASKS[file_code] = delete_task
+
+        # A generic link based on the file code, since direct link function is not allowed
+        generic_link = f"https://send.now/d/{file_code}"
             
         final_text = f"✅ সফলভাবে আপলোড করা হয়েছে!\n\n"
         final_text += f"**ফাইল কোড:** `{file_code}`\n"
         final_text += f"**নাম:** `{new_name}`\n"
-        final_text += f"**সরাসরি লিঙ্ক:** {direct_link}\n"
+        final_text += f"**ফাইল লিঙ্ক:** {generic_link}\n"
         final_text += f"\n_এই ফাইলটি ২৪ ঘন্টা পর স্বয়ংক্রিয়ভাবে ক্লাউড থেকে ডিলিট হয়ে যাবে।_"
         
         await processing_msg.edit_text(final_text, parse_mode=ParseMode.MARKDOWN)
