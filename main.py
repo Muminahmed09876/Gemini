@@ -532,13 +532,20 @@ async def periodic_cleanup():
             pass
         await asyncio.sleep(3600)
 
+# The corrected main block to run both tasks
 if __name__ == "__main__":
     print("Bot চালু হচ্ছে... Flask and Ping threads start করা হচ্ছে, তারপর Pyrogram চালু হবে।")
     t = threading.Thread(target=run_flask_and_ping, daemon=True)
     t.start()
+    
+    # Run the bot and the periodic cleanup task concurrently
     try:
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(periodic_cleanup())
-        app.run()
+        # Create a task for Pyrogram bot and for the cleanup
+        tasks = [
+            loop.create_task(app.run()),
+            loop.create_task(periodic_cleanup())
+        ]
+        loop.run_until_complete(asyncio.gather(*tasks))
     except KeyboardInterrupt:
         print("Bot বন্ধ করা হচ্ছে...")
