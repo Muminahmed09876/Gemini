@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
 import os
 import re
 import aiohttp
 import asyncio
 import threading
-import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
@@ -29,9 +27,8 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "5000"))
+# New env var from previous code
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME") 
-# New env var for send.now API key
-SENDNOW_API_KEY = os.getenv("SENDNOW_API_KEY")
 
 TMP = Path("tmp")
 TMP.mkdir(parents=True, exist_ok=True)
@@ -43,13 +40,11 @@ SET_THUMB_REQUEST = set()
 SUBSCRIBERS = set()
 SET_CAPTION_REQUEST = set()
 USER_CAPTIONS = {}
+# New state for dynamic captions
 USER_COUNTERS = {}
+# New state for edit caption mode
 EDIT_CAPTION_MODE = set()
 USER_THUMB_TIME = {}
-# New state for send.now tasks
-SENDNOW_DELETE_TASKS = {}
-# New state for cloud upload toggle mode
-CLOUD_UPLOAD_MODE = set()
 
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
@@ -153,49 +148,91 @@ async def fetch_with_retries(session, url, method="GET", max_tries=3, **kwargs):
             backoff *= 2
     raise RuntimeError("unreachable")
 
-async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None):
+async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, max_retries=3):
     timeout = aiohttp.ClientTimeout(total=7200)
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
     connector = aiohttp.TCPConnector(limit=0, force_close=True)
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
+    
+    for attempt in range(max_retries):
+        if cancel_event and cancel_event.is_set():
+            return False, "অপারেশন ব্যবহারকারী দ্বারা বাতিল করা হয়েছে।"
+            
         try:
-            async with sess.get(url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    return False, f"HTTP {resp.status}"
-                return await download_stream(resp, out_path, message, cancel_event=cancel_event)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
+                async with sess.get(url, allow_redirects=True) as resp:
+                    if resp.status == 403:
+                        return False, "ডাউনলোড ব্যর্থ: HTTP 403 Forbidden. লিঙ্কটি সম্ভবত পাবলিক নয় বা অনুমতি নেই।"
+                    elif resp.status == 429:
+                        return False, "ডাউনলোড ব্যর্থ: HTTP 429 Too Many Requests. সার্ভার আপনার অনুরোধ ব্লক করছে।"
+                    elif resp.status != 200:
+                        return False, f"ডাউনলোড ব্যর্থ: HTTP {resp.status}"
+
+                    ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event)
+                    if ok:
+                        return True, None
+                    else:
+                        logger.warning(f"Download stream failed: {err}. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(5)  # Wait before retrying
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"Download failed with exception: {e}. Retrying... (Attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(5)
+            continue
         except Exception as e:
             return False, str(e)
+            
+    return False, f"ডাউনলোড ব্যর্থ: {max_retries} বারের চেষ্টাতেও সফল হয়নি।"
 
-async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None):
-    base = f"https://drive.google.com/uc?export=download&id={file_id}"
-    timeout = aiohttp.ClientTimeout(total=7200)
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
-    connector = aiohttp.TCPConnector(limit=0, force_close=True)
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
+async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, max_retries=3):
+    for attempt in range(max_retries):
+        if cancel_event and cancel_event.is_set():
+            return False, "অপারেশন ব্যবহারকারী দ্বারা বাতিল করা হয়েছে।"
+            
+        base = f"https://drive.google.com/uc?export=download&id={file_id}"
+        timeout = aiohttp.ClientTimeout(total=7200)
+        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
+        connector = aiohttp.TCPConnector(limit=0, force_close=True)
+        
         try:
-            async with sess.get(base, allow_redirects=True) as resp:
-                if resp.status == 200 and "content-disposition" in (k.lower() for k in resp.headers.keys()):
-                    return await download_stream(resp, out_path, message, cancel_event=cancel_event)
-                text = await resp.text(errors="ignore")
-                m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
-                if m:
-                    token = m.group(1)
-                    download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
-                    async with sess.get(download_url, allow_redirects=True) as resp2:
-                        if resp2.status != 200:
-                            return False, f"HTTP {resp2.status}"
-                        return await download_stream(resp2, out_path, message, cancel_event=cancel_event)
-                for k, v in resp.cookies.items():
-                    if k.startswith("download_warning"):
-                        token = v.value
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
+                async with sess.get(base, allow_redirects=True) as resp:
+                    if resp.status == 200 and "content-disposition" in (k.lower() for k in resp.headers.keys()):
+                        ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event)
+                        if ok: return True, None
+                        
+                    elif resp.status == 403:
+                        return False, "ডাউনলোডের জন্য Google Drive থেকে অনুমতি প্রয়োজন বা লিংক পাবলিক নয়।"
+
+                    text = await resp.text(errors="ignore")
+                    m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
+                    if m:
+                        token = m.group(1)
                         download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
                         async with sess.get(download_url, allow_redirects=True) as resp2:
                             if resp2.status != 200:
                                 return False, f"HTTP {resp2.status}"
-                            return await download_stream(resp2, out_path, message, cancel_event=cancel_event)
-                return False, "ডাউনলোডের জন্য Google Drive থেকে অনুমতি প্রয়োজন বা লিংক পাবলিক নয়।"
+                            ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event)
+                            if ok: return True, None
+                            
+                    for k, v in resp.cookies.items():
+                        if k.startswith("download_warning"):
+                            token = v.value
+                            download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
+                            async with sess.get(download_url, allow_redirects=True) as resp2:
+                                if resp2.status != 200:
+                                    return False, f"HTTP {resp2.status}"
+                                ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event)
+                                if ok: return True, None
+                                
+            logger.warning(f"Drive download failed (stream or token). Retrying... (Attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(5)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"Drive download failed with exception: {e}. Retrying... (Attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(5)
+            continue
         except Exception as e:
             return False, str(e)
+
+    return False, f"ডাউনলোড ব্যর্থ: {max_retries} বারের চেষ্টাতেও সফল হয়নি।"
 
 async def set_bot_commands():
     cmds = [
@@ -209,128 +246,12 @@ async def set_bot_commands():
         BotCommand("edit_caption_mode", "শুধু ক্যাপশন এডিট করুন (admin only)"),
         BotCommand("rename", "reply করা ভিডিও রিনেম করুন (admin only)"),
         BotCommand("broadcast", "ব্রডকাস্ট (কেবল অ্যাডমিন)"),
-        # New command
-        BotCommand("upload_to_cloud", "ক্লাউড আপলোড মোড চালু/বন্ধ (admin only)"),
         BotCommand("help", "সহায়িকা")
     ]
     try:
         await app.set_bot_commands(cmds)
     except Exception as e:
         logger.warning("Set commands error: %s", e)
-
-# New send.now API integration
-class SendNowAPI:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = "https://send.now/api"
-
-    async def get_upload_server(self, session: aiohttp.ClientSession):
-        url = f"{self.base_url}/upload/server?key={self.api_key}"
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            if data["status"] == 200:
-                return data["result"], data["sess_id"]
-            else:
-                raise Exception(f"Failed to get upload server: {data.get('msg')}")
-
-    async def upload_file(self, session: aiohttp.ClientSession, upload_url: str, sess_id: str, file_path: Path):
-        data = aiohttp.FormData()
-        data.add_field("sess_id", sess_id)
-        data.add_field("utype", "prem")
-        data.add_field("file_0", open(file_path, "rb"), filename=file_path.name)
-        
-        async with session.post(upload_url, data=data) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            if data and data[0]["file_status"] == "OK":
-                return data[0]["file_code"]
-            else:
-                raise Exception(f"Failed to upload file: {data.get('msg', 'Unknown error')}")
-
-    async def rename_file(self, session: aiohttp.ClientSession, file_code: str, new_name: str):
-        url = f"{self.base_url}/file/rename?key={self.api_key}&file_code={file_code}&name={new_name}"
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            if data["status"] == 200 and data["result"] == "true":
-                return True
-            else:
-                raise Exception(f"Failed to rename file: {data.get('msg')}")
-
-    async def delete_file(self, session: aiohttp.ClientSession, file_code: str):
-        url = f"{self.base_url}/file/delete?key={self.api_key}&file_code={file_code}"
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            if data["status"] == 200:
-                return True
-            else:
-                raise Exception(f"Failed to delete file: {data.get('msg')}")
-
-async def scheduled_delete_task(file_code: str, chat_id: int):
-    # This function will run after 24 hours
-    await asyncio.sleep(24 * 3600)  # Sleep for 24 hours
-    logger.info(f"Attempting to delete file {file_code} after 24 hours.")
-    async with aiohttp.ClientSession() as session:
-        api = SendNowAPI(SENDNOW_API_KEY)
-        try:
-            await api.delete_file(session, file_code)
-            await app.send_message(chat_id, f"ফাইলটি (`{file_code}`) ২৪ ঘন্টা পর ক্লাউড থেকে সফলভাবে ডিলিট করা হয়েছে।")
-        except Exception as e:
-            await app.send_message(chat_id, f"ফাইল (`{file_code}`) ডিলিট করতে সমস্যা হয়েছে: {e}")
-            logger.error(f"Error deleting file {file_code}: {e}")
-    if file_code in SENDNOW_DELETE_TASKS:
-        del SENDNOW_DELETE_TASKS[file_code]
-
-async def upload_to_cloud_process(client: Client, message: Message, file_path: Path):
-    if not SENDNOW_API_KEY:
-        await message.reply_text("`SENDNOW_API_KEY` এনভায়রনমেন্ট ভেরিয়েবল সেট করা নেই।")
-        return
-    
-    processing_msg = await message.reply_text("ভিডিও আপলোড করা হচ্ছে... ⏳")
-    
-    try:
-        api = SendNowAPI(SENDNOW_API_KEY)
-        
-        await processing_msg.edit_text("ভিডিও আপলোডের জন্য ক্লাউড সার্ভার তৈরি করা হচ্ছে...")
-        async with aiohttp.ClientSession() as session:
-            upload_url, sess_id = await api.get_upload_server(session)
-            
-            await processing_msg.edit_text("ক্লাউডে ভিডিও আপলোড হচ্ছে...")
-            file_code = await api.upload_file(session, upload_url, sess_id, file_path)
-            
-            # Rename the file with its original extension
-            await processing_msg.edit_text("ফাইলটি রিনেম করা হচ্ছে...")
-            original_name = message.video.file_name if message.video else "video"
-            file_extension = Path(original_name).suffix
-            new_name = f"@TA_HD_Anime{file_extension}"
-            await api.rename_file(session, file_code, new_name)
-            
-            # A generic link based on the file code
-            generic_link = f"https://send.now/d/{file_code}"
-            
-            # Schedule the deletion task
-            delete_task = asyncio.create_task(scheduled_delete_task(file_code, message.chat.id))
-            SENDNOW_DELETE_TASKS[file_code] = delete_task
-            
-        final_text = f"✅ সফলভাবে আপলোড করা হয়েছে!\n\n"
-        final_text += f"**ফাইল কোড:** `{file_code}`\n"
-        final_text += f"**নাম:** `{new_name}`\n"
-        final_text += f"**ফাইল লিঙ্ক:** {generic_link}\n"
-        final_text += f"\n_এই ফাইলটি ২৪ ঘন্টা পর স্বয়ংক্রিয়ভাবে ক্লাউড থেকে ডিলিট হয়ে যাবে।_"
-        
-        await processing_msg.edit_text(final_text, parse_mode=ParseMode.MARKDOWN)
-
-    except Exception as e:
-        logger.error(f"Error in cloud upload process: {traceback.format_exc()}")
-        await processing_msg.edit_text(f"একটি সমস্যা হয়েছে: {e}")
-    finally:
-        if file_path.exists():
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete local file: {e}")
 
 # ---- handlers ----
 @app.on_message(filters.command("start") & filters.private)
@@ -341,75 +262,22 @@ async def start_handler(c, m: Message):
         "Hi! আমি URL uploader bot.\n\n"
         "নোট: বটের অনেক কমান্ড শুধু অ্যাডমিন (owner) চালাতে পারবে।\n\n"
         "Commands:\n"
-        "/upload_url <url> - URL থেকে ফাইল ডাউনলোড ও Telegram-এ আপলোড (admin only)\n"
-        "/upload_to_cloud - ক্লাউড আপলোড মোড চালু/বন্ধ (admin only)\n"
+        "/upload_url <url> - URL থেকে ডাউনলোড ও Telegram-এ আপলোড (admin only)\n"
         "/setthumb - একটি ছবি পাঠান, সেট হবে আপনার থাম্বনেইল (admin only)\n"
         "/view_thumb - আপনার থাম্বনেইল দেখুন (admin only)\n"
         "/del_thumb - আপনার থাম্বনেইল মুছে ফেলুন (admin only)\n"
-        "/set_caption - কাস্টম ক্যাপশন সেট করুন (admin only)\n"
+        "/set_caption - একটি ক্যাপশন সেট করুন (admin only)\n"
         "/view_caption - আপনার ক্যাপশন দেখুন (admin only)\n"
         "/edit_caption_mode - শুধু ক্যাপশন এডিট করার মোড টগল করুন (admin only)\n"
         "/rename <newname.ext> - reply করা ভিডিও রিনেম করুন (admin only)\n"
-        "/broadcast <text> - ব্রডকাস্ট (কেবল অ্যাডমিন)\n"
-        "/help - সহায়িকা"
+        "/broadcast <text> - ব্রডকাস্ট (শুধুমাত্র অ্যাডমিন)\n"
+        "/help - সাহায্য"
     )
     await m.reply_text(text)
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_handler(c, m):
     await start_handler(c, m)
-
-@app.on_message(filters.command("upload_url") & filters.private)
-async def upload_url_handler(c, m: Message):
-    if not is_admin(m.from_user.id):
-        await m.reply_text("এই কমান্ড শুধুমাত্র অ্যাডমিন ব্যবহার করতে পারবে।")
-        return
-    if not m.command or len(m.command) < 2:
-        await m.reply_text("ব্যবহার: /upload_url <url>\nউদাহরণ: /upload_url https://example.com/file.mp4")
-        return
-    url = m.text.split(None, 1)[1].strip()
-    asyncio.create_task(handle_url_download_and_upload(c, m, url))
-
-# New command handler for cloud upload toggle
-@app.on_message(filters.command("upload_to_cloud") & filters.private)
-async def upload_to_cloud_toggle_handler(c, m: Message):
-    if not is_admin(m.from_user.id):
-        await m.reply_text("এই কমান্ড শুধুমাত্র অ্যাডমিন ব্যবহার করতে পারবে।")
-        return
-    
-    user_id = m.from_user.id
-    if user_id in CLOUD_UPLOAD_MODE:
-        CLOUD_UPLOAD_MODE.remove(user_id)
-        await m.reply_text("Upload to cloud is now **OFF**.")
-    else:
-        CLOUD_UPLOAD_MODE.add(user_id)
-        await m.reply_text("Upload to cloud is now **ON**.")
-
-@app.on_message(filters.video & filters.private)
-async def handle_video_upload(c: Client, m: Message):
-    if not is_admin(m.from_user.id):
-        # Allow non-admins to use the bot normally
-        return
-
-    if m.from_user.id in CLOUD_UPLOAD_MODE:
-        processing_msg = await m.reply_text("ভিডিওটি ক্লাউডে আপলোডের জন্য প্রক্রিয়া করা হচ্ছে...")
-        file_path = Path(f"tmp/{m.video.file_unique_id}.mp4")
-        try:
-            await c.download_media(m, file_path)
-            await upload_to_cloud_process(c, m, file_path)
-        except Exception as e:
-            await processing_msg.edit_text(f"ফাইল ডাউনলোড করতে সমস্যা হয়েছে: {e}")
-            logger.error(f"Error downloading video: {e}")
-        finally:
-            if file_path.exists():
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    logger.warning(f"Failed to delete local file: {e}")
-    else:
-        # Existing video handling logic goes here
-        # Example: just acknowledging the video or uploading to Telegram
-        pass
 
 @app.on_message(filters.command("setthumb") & filters.private)
 async def setthumb_prompt(c, m):
@@ -564,6 +432,17 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         asyncio.create_task(handle_url_download_and_upload(c, m, text))
     
+@app.on_message(filters.command("upload_url") & filters.private)
+async def upload_url_cmd(c, m: Message):
+    if not is_admin(m.from_user.id):
+        await m.reply_text("আপনার অনুমতি নেই এই কমান্ড চালানোর।")
+        return
+    if not m.command or len(m.command) < 2:
+        await m.reply_text("ব্যবহার: /upload_url <url>\nউদাহরণ: /upload_url https://example.com/file.mp4")
+        return
+    url = m.text.split(None, 1)[1].strip()
+    asyncio.create_task(handle_url_download_and_upload(c, m, url))
+
 async def handle_url_download_and_upload(c: Client, m: Message, url: str):
     uid = m.from_user.id
     cancel_event = asyncio.Event()
